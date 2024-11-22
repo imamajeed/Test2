@@ -1,81 +1,75 @@
-{
-  "schemaVersion": "2.2",
-  "description": "Add or remove AD group on Linux EC2 with optional root access",
-  "parameters": {
-    "GroupName": {
-      "type": "String",
-      "description": "Enter the AD group name to add or remove"
-    },
-    "Action": {
-      "type": "String",
-      "description": "Enter 'add' to add the group or 'remove' to remove the group",
-      "allowedValues": ["add", "remove"]
-    },
-    "RootAccess": {
-      "type": "String",
-      "description": "Enter 'yes' if root access is required, otherwise enter 'no'",
-      "allowedValues": ["yes", "no"]
-    }
-  },
-  "mainSteps": [
-    {
-      "action": "aws:runShellScript",
-      "name": "ManageADGroup",
-      "inputs": {
-        "runCommand": [
-          "#!/bin/bash",
-          "GROUP_NAME=\"{{GroupName}}\"",
-          "ACTION=\"{{Action}}\"",
-          "ROOT_ACCESS=\"{{RootAccess}}\"",
-          "",
-          "# Check if native-ad is installed",
-          "if command -v native-adgroup &> /dev/null; then",
-          "  echo \"native-adgroup command found.\"",
-          "  if [ \"$ACTION\" == \"add\" ]; then",
-          "    if [ \"$ROOT_ACCESS\" == \"yes\" ]; then",
-          "      sudo native-adgroup add $GROUP_NAME --privileges=root",
-          "    else",
-          "      sudo native-adgroup add $GROUP_NAME",
-          "    fi",
-          "  elif [ \"$ACTION\" == \"remove\" ]; then",
-          "    sudo native-adgroup remove $GROUP_NAME",
-          "  fi",
-          "else",
-          "  echo \"native-adgroup not found. Updating sssd.conf.\"",
-          "  SSSD_CONF=\"/etc/sssd/sssd.conf\"",
-          "",
-          "  # Backup existing sssd.conf",
-          "  if [ -f \"$SSSD_CONF\" ]; then",
-          "    sudo cp $SSSD_CONF ${SSSD_CONF}.bak",
-          "  fi",
-          "",
-          "  # Modify sssd.conf based on action",
-          "  if [ \"$ACTION\" == \"add\" ]; then",
-          "    echo -e \"[domain/default]\" | sudo tee -a $SSSD_CONF",
-          "    echo -e \"allow_groups = $GROUP_NAME\" | sudo tee -a $SSSD_CONF",
-          "    if [ \"$ROOT_ACCESS\" == \"yes\" ]; then",
-          "      echo -e \"ad_gpo_access_control = enforcing\" | sudo tee -a $SSSD_CONF",
-          "      echo -e \"ad_gpo_map = $GROUP_NAME:ALL\" | sudo tee -a $SSSD_CONF",
-          "    fi",
-          "  elif [ \"$ACTION\" == \"remove\" ]; then",
-          "    sudo sed -i \"/$GROUP_NAME/d\" $SSSD_CONF",
-          "  fi",
-          "",
-          "  # Restart SSSD service",
-          "  echo \"Restarting SSSD service to apply changes.\"",
-          "  sudo systemctl restart sssd",
-          "fi",
-          "",
-          "# Confirm changes",
-          "if [ \"$ACTION\" == \"add\" ]; then",
-          "  echo \"Validating group addition.\"",
-          "  getent group $GROUP_NAME",
-          "elif [ \"$ACTION\" == \"remove\" ]; then",
-          "  echo \"Validating group removal.\"",
-          "  getent group $GROUP_NAME || echo \"Group successfully removed.\"",
-          "fi"
-        ]
-      }
-    }
-  ]
-}
+schemaVersion: "2.2"
+description: "Add or remove AD group on Linux EC2 with optional root access"
+parameters:
+  GroupName:
+    type: String
+    description: "Enter the AD group name to add or remove"
+  Action:
+    type: String
+    description: "Enter 'add' to add the group or 'remove' to remove the group"
+    allowedValues:
+      - "add"
+      - "remove"
+  RootAccess:
+    type: String
+    description: "Enter 'yes' if root access is required, otherwise enter 'no'"
+    allowedValues:
+      - "yes"
+      - "no"
+mainSteps:
+  - action: aws:runShellScript
+    name: ManageADGroup
+    inputs:
+      runCommand:
+        - |
+          #!/bin/bash
+          GROUP_NAME="{{GroupName}}"
+          ACTION="{{Action}}"
+          ROOT_ACCESS="{{RootAccess}}"
+
+          # Check if native-ad is installed
+          if command -v native-adgroup &> /dev/null; then
+            echo "native-adgroup command found."
+            if [ "$ACTION" == "add" ]; then
+              if [ "$ROOT_ACCESS" == "yes" ]; then
+                sudo native-adgroup add $GROUP_NAME --privileges=root
+              else
+                sudo native-adgroup add $GROUP_NAME
+              fi
+            elif [ "$ACTION" == "remove" ]; then
+              sudo native-adgroup remove $GROUP_NAME
+            fi
+          else
+            echo "native-adgroup not found. Updating sssd.conf."
+            SSSD_CONF="/etc/sssd/sssd.conf"
+
+            # Backup existing sssd.conf
+            if [ -f "$SSSD_CONF" ]; then
+              sudo cp $SSSD_CONF ${SSSD_CONF}.bak
+            fi
+
+            # Modify sssd.conf based on action
+            if [ "$ACTION" == "add" ]; then
+              echo -e "[domain/default]" | sudo tee -a $SSSD_CONF
+              echo -e "allow_groups = $GROUP_NAME" | sudo tee -a $SSSD_CONF
+              if [ "$ROOT_ACCESS" == "yes" ]; then
+                echo -e "ad_gpo_access_control = enforcing" | sudo tee -a $SSSD_CONF
+                echo -e "ad_gpo_map = $GROUP_NAME:ALL" | sudo tee -a $SSSD_CONF
+              fi
+            elif [ "$ACTION" == "remove" ]; then
+              sudo sed -i "/$GROUP_NAME/d" $SSSD_CONF
+            fi
+
+            # Restart SSSD service
+            echo "Restarting SSSD service to apply changes."
+            sudo systemctl restart sssd
+          fi
+
+          # Confirm changes
+          if [ "$ACTION" == "add" ]; then
+            echo "Validating group addition."
+            getent group $GROUP_NAME
+          elif [ "$ACTION" == "remove" ]; then
+            echo "Validating group removal."
+            getent group $GROUP_NAME || echo "Group successfully removed."
+          fi
