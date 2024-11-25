@@ -1,75 +1,49 @@
-schemaVersion: "2.2"
-description: "Add or remove AD group on Linux EC2 with optional root access"
-parameters:
-  GroupName:
-    type: String
-    description: "Enter the AD group name to add or remove"
-  Action:
-    type: String
-    description: "Enter 'add' to add the group or 'remove' to remove the group"
-    allowedValues:
-      - "add"
-      - "remove"
-  RootAccess:
-    type: String
-    description: "Enter 'yes' if root access is required, otherwise enter 'no'"
-    allowedValues:
-      - "yes"
-      - "no"
-mainSteps:
-  - action: aws:runShellScript
-    name: ManageADGroup
-    inputs:
-      runCommand:
-        - |
-          #!/bin/bash
-          GROUP_NAME="{{GroupName}}"
-          ACTION="{{Action}}"
-          ROOT_ACCESS="{{RootAccess}}"
+import boto3
 
-          # Check if native-ad is installed
-          if command -v native-adgroup &> /dev/null; then
-            echo "native-adgroup command found."
-            if [ "$ACTION" == "add" ]; then
-              if [ "$ROOT_ACCESS" == "yes" ]; then
-                sudo native-adgroup add $GROUP_NAME --privileges=root
-              else
-                sudo native-adgroup add $GROUP_NAME
-              fi
-            elif [ "$ACTION" == "remove" ]; then
-              sudo native-adgroup remove $GROUP_NAME
-            fi
-          else
-            echo "native-adgroup not found. Updating sssd.conf."
-            SSSD_CONF="/etc/sssd/sssd.conf"
+def evaluate_compliance(event, context):
+    ec2_client = boto3.client('ec2')
+    ssm_client = boto3.client('ssm')
+    
+    # Extract instance details from the event
+    instance_id = event['resourceId']
+    
+    try:
+        # Check if instance is managed by SSM
+        response = ssm_client.describe_instance_information(
+            Filters=[{'Key': 'InstanceIds', 'Values': [instance_id]}]
+        )
+        if response['InstanceInformationList']:
+            return {
+                'compliance_type': 'COMPLIANT',
+                'annotation': 'SSM Agent is running on the instance.'
+            }
+        else:
+            return {
+                'compliance_type': 'NON_COMPLIANT',
+                'annotation': 'SSM Agent is not running on the instance.'
+            }
+    except Exception as e:
+        return {
+            'compliance_type': 'NON_COMPLIANT',
+            'annotation': f'Error checking SSM Agent status: {str(e)}'
+        }
 
-            # Backup existing sssd.conf
-            if [ -f "$SSSD_CONF" ]; then
-              sudo cp $SSSD_CONF ${SSSD_CONF}.bak
-            fi
-
-            # Modify sssd.conf based on action
-            if [ "$ACTION" == "add" ]; then
-              echo -e "[domain/default]" | sudo tee -a $SSSD_CONF
-              echo -e "allow_groups = $GROUP_NAME" | sudo tee -a $SSSD_CONF
-              if [ "$ROOT_ACCESS" == "yes" ]; then
-                echo -e "ad_gpo_access_control = enforcing" | sudo tee -a $SSSD_CONF
-                echo -e "ad_gpo_map = $GROUP_NAME:ALL" | sudo tee -a $SSSD_CONF
-              fi
-            elif [ "$ACTION" == "remove" ]; then
-              sudo sed -i "/$GROUP_NAME/d" $SSSD_CONF
-            fi
-
-            # Restart SSSD service
-            echo "Restarting SSSD service to apply changes."
-            sudo systemctl restart sssd
-          fi
-
-          # Confirm changes
-          if [ "$ACTION" == "add" ]; then
-            echo "Validating group addition."
-            getent group $GROUP_NAME
-          elif [ "$ACTION" == "remove" ]; then
-            echo "Validating group removal."
-            getent group $GROUP_NAME || echo "Group successfully removed."
-          fi
+def lambda_handler(event, context):
+    evaluations = []
+    for configuration_item in event['invokingEvent']['configurationItems']:
+        instance_id = configuration_item['resourceId']
+        evaluation_result = evaluate_compliance({'resourceId': instance_id}, context)
+        evaluations.append({
+            'ComplianceResourceType': 'AWS::EC2::Instance',
+            'ComplianceResourceId': instance_id,
+            'ComplianceType': evaluation_result['compliance_type'],
+            'Annotation': evaluation_result['annotation'],
+            'OrderingTimestamp': configuration_item['configurationItemCaptureTime']
+        })
+    
+    # Return evaluations to AWS Config
+    config_client = boto3.client('config')
+    config_client.put_evaluations(
+        Evaluations=evaluations,
+        ResultToken=event['resultToken']
+    )
