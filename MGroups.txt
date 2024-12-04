@@ -1,49 +1,100 @@
-import boto3
-
-def evaluate_compliance(event, context):
-    ec2_client = boto3.client('ec2')
-    ssm_client = boto3.client('ssm')
-    
-    # Extract instance details from the event
-    instance_id = event['resourceId']
-    
-    try:
-        # Check if instance is managed by SSM
-        response = ssm_client.describe_instance_information(
-            Filters=[{'Key': 'InstanceIds', 'Values': [instance_id]}]
-        )
-        if response['InstanceInformationList']:
-            return {
-                'compliance_type': 'COMPLIANT',
-                'annotation': 'SSM Agent is running on the instance.'
-            }
-        else:
-            return {
-                'compliance_type': 'NON_COMPLIANT',
-                'annotation': 'SSM Agent is not running on the instance.'
-            }
-    except Exception as e:
-        return {
-            'compliance_type': 'NON_COMPLIANT',
-            'annotation': f'Error checking SSM Agent status: {str(e)}'
+{
+  "schemaVersion": "0.3",
+  "description": "SSM Automation to manage Adgroup on Linux servers.",
+  "parameters": {
+    "AdgroupName": {
+      "type": "String",
+      "description": "Enter the Adgroup name."
+    },
+    "Action": {
+      "type": "String",
+      "description": "Enter the action (add/remove).",
+      "allowedValues": ["add", "remove"]
+    },
+    "RootAccess": {
+      "type": "String",
+      "description": "Do you want to grant root access? (yes/no)",
+      "default": "no",
+      "allowedValues": ["yes", "no"],
+      "required": false
+    }
+  },
+  "mainSteps": [
+    {
+      "name": "CheckNativeAd",
+      "action": "aws:runCommand",
+      "inputs": {
+        "DocumentName": "AWS-RunShellScript",
+        "Parameters": {
+          "commands": [
+            "if command -v native-ad &> /dev/null; then echo 'installed'; else echo 'not_installed'; fi"
+          ]
         }
-
-def lambda_handler(event, context):
-    evaluations = []
-    for configuration_item in event['invokingEvent']['configurationItems']:
-        instance_id = configuration_item['resourceId']
-        evaluation_result = evaluate_compliance({'resourceId': instance_id}, context)
-        evaluations.append({
-            'ComplianceResourceType': 'AWS::EC2::Instance',
-            'ComplianceResourceId': instance_id,
-            'ComplianceType': evaluation_result['compliance_type'],
-            'Annotation': evaluation_result['annotation'],
-            'OrderingTimestamp': configuration_item['configurationItemCaptureTime']
-        })
-    
-    # Return evaluations to AWS Config
-    config_client = boto3.client('config')
-    config_client.put_evaluations(
-        Evaluations=evaluations,
-        ResultToken=event['resultToken']
-    )
+      },
+      "outputs": [
+        {
+          "Name": "NativeAdStatus",
+          "Selector": "$.CommandPlugins[0].Output",
+          "Type": "String"
+        }
+      ]
+    },
+    {
+      "name": "UseNativeAd",
+      "action": "aws:runCommand",
+      "inputs": {
+        "DocumentName": "AWS-RunShellScript",
+        "Parameters": {
+          "commands": [
+            "native-ad group {{ Action }} {{ AdgroupName }}"
+          ]
+        }
+      },
+      "precondition": {
+        "StringEquals": ["{{ CheckNativeAd.NativeAdStatus }}", "installed"]
+      },
+      "onFailure": "continue"
+    },
+    {
+      "name": "ModifySSSDConf",
+      "action": "aws:runCommand",
+      "inputs": {
+        "DocumentName": "AWS-RunShellScript",
+        "Parameters": {
+          "commands": [
+            "if [[ {{ Action }} == 'add' ]]; then sed -i '/allowed_groups =/ s/$/,{{ AdgroupName }}/' /etc/sssd/sssd.conf; fi",
+            "if [[ {{ Action }} == 'remove' ]]; then sed -i '/allowed_groups =/ s/,{{ AdgroupName }}//' /etc/sssd/sssd.conf; fi",
+            "systemctl reload sssd"
+          ]
+        }
+      },
+      "precondition": {
+        "StringEquals": ["{{ CheckNativeAd.NativeAdStatus }}", "not_installed"]
+      },
+      "onFailure": "continue"
+    },
+    {
+      "name": "GrantRootAccess",
+      "action": "aws:runCommand",
+      "inputs": {
+        "DocumentName": "AWS-RunShellScript",
+        "Parameters": {
+          "commands": [
+            "echo '%{{ AdgroupName }} ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers"
+          ]
+        }
+      },
+      "precondition": {
+        "And": [
+          {
+            "StringEquals": ["{{ Action }}", "add"]
+          },
+          {
+            "StringEquals": ["{{ RootAccess }}", "yes"]
+          }
+        ]
+      },
+      "onFailure": "continue"
+    }
+  ]
+}
